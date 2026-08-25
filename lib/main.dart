@@ -1264,7 +1264,7 @@ class PlaylistPage extends StatelessWidget {
                           Text(
                             tr(
                               '${items.length}개 클립 · ${items.fold<int>(0, (s, e) => s + e.length.inSeconds) ~/ 60}분',
-                              '${items.length} clips · ${items.fold<int>(0, (s, e) => s + e.length.inSeconds) ~/ 60} min',
+                              '${items.length} ${items.length == 1 ? 'clip' : 'clips'} · ${items.fold<int>(0, (s, e) => s + e.length.inSeconds) ~/ 60} min',
                             ),
                             style: Theme.of(context).textTheme.bodyMedium,
                           ),

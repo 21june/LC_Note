@@ -18,7 +18,7 @@ The interface automatically follows the device language: Korean devices keep the
 
 ![LC Note playlists screen](docs/screenshots/playlists.png)
 
-> These screenshots were captured with the device language set to Korean. LC Note displays the corresponding English interface on devices using any other language.
+> Screenshots show the English interface. Devices using Korean as their system language display the corresponding Korean interface automatically.
 
 ## Features
 
