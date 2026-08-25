@@ -1853,6 +1853,7 @@ class _ClipEditorState extends State<ClipEditor> {
   final AudioPlayer _previewPlayer = AudioPlayer();
   Timer? _previewTimer;
   bool _previewing = false;
+  Duration _previewPosition = Duration.zero;
   bool _timelineMode = false;
   bool _locatorPlaying = false;
   Duration _audioDuration = Duration.zero;
@@ -1889,6 +1890,7 @@ class _ClipEditorState extends State<ClipEditor> {
     memo = TextEditingController(text: c?.memo ?? '');
     start = c?.start ?? const Duration(minutes: 1);
     end = c?.end ?? const Duration(minutes: 2);
+    _previewPosition = start;
     playlist = c != null && widget.playlists.contains(c.playlist)
         ? c.playlist
         : widget.playlists.first;
@@ -1896,7 +1898,21 @@ class _ClipEditorState extends State<ClipEditor> {
     _locatorPosition = c?.start ?? Duration.zero;
     _detailCenter = _locatorPosition;
     _locatorSubscription = _previewPlayer.positionStream.listen((position) {
-      if (!mounted || !_locatorPlaying) return;
+      if (!mounted) return;
+      if (_previewing) {
+        if (position >= end) {
+          _previewPlayer.pause();
+          _previewTimer?.cancel();
+          setState(() {
+            _previewPosition = end;
+            _previewing = false;
+          });
+        } else if (position >= start) {
+          setState(() => _previewPosition = position);
+        }
+        return;
+      }
+      if (!_locatorPlaying) return;
       if (_audioDuration > Duration.zero && position >= _audioDuration) {
         _previewPlayer.pause();
         setState(() {
@@ -1951,6 +1967,7 @@ class _ClipEditorState extends State<ClipEditor> {
             if (start > duration) start = Duration.zero;
             if (end > duration) end = duration;
           }
+          _previewPosition = start;
         });
       }
     } catch (_) {
@@ -2272,6 +2289,7 @@ class _ClipEditorState extends State<ClipEditor> {
       _selectedDetectedSegment = index;
       start = segment.start;
       end = segment.end;
+      _previewPosition = segment.start;
       _locatorPosition = segment.start;
       _detailCenter = segment.start;
       _previewing = false;
@@ -2374,6 +2392,7 @@ class _ClipEditorState extends State<ClipEditor> {
       } else if (_locatorPosition > start) {
         end = _locatorPosition;
       }
+      _previewPosition = start;
     });
     if (!isStart && _locatorPosition <= start) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2417,10 +2436,59 @@ class _ClipEditorState extends State<ClipEditor> {
       await _setPreviewFile(audioPath!);
       await _previewPlayer.seek(start);
       unawaited(_previewPlayer.play());
-      if (mounted) setState(() => _previewing = true);
+      if (mounted) {
+        setState(() {
+          _previewPosition = start;
+          _previewing = true;
+        });
+      }
       _previewTimer = Timer(end - start, () async {
         await _previewPlayer.pause();
-        if (mounted) setState(() => _previewing = false);
+        if (mounted) {
+          setState(() {
+            _previewPosition = end;
+            _previewing = false;
+          });
+        }
+      });
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              tr('선택한 오디오를 재생할 수 없습니다.', 'Unable to play the selected audio.'),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _playSelectionFrom(Duration position) async {
+    if (audioPath == null || end <= start) return;
+    final safePosition = position < start || position >= end ? start : position;
+    try {
+      _previewTimer?.cancel();
+      if (_locatorPlaying) {
+        await _previewPlayer.pause();
+        _locatorPlaying = false;
+      }
+      await _setPreviewFile(audioPath!);
+      await _previewPlayer.seek(safePosition);
+      unawaited(_previewPlayer.play());
+      if (!mounted) return;
+      setState(() {
+        _previewPosition = safePosition;
+        _previewing = true;
+      });
+      _previewTimer = Timer(end - safePosition, () async {
+        await _previewPlayer.pause();
+        if (mounted) {
+          setState(() {
+            _previewPosition = end;
+            _previewing = false;
+          });
+        }
       });
     } catch (_) {
       if (mounted) {
@@ -2445,6 +2513,7 @@ class _ClipEditorState extends State<ClipEditor> {
         end += Duration(milliseconds: milliseconds);
         if (end <= start) end = start + const Duration(milliseconds: 100);
       }
+      _previewPosition = start;
     });
   }
 
@@ -2585,7 +2654,7 @@ class _ClipEditorState extends State<ClipEditor> {
             ),
             child: Column(
               children: [
-                if (!_timelineMode)
+                if (!_timelineMode) ...[
                   Row(
                     children: [
                       Expanded(
@@ -2606,8 +2675,78 @@ class _ClipEditorState extends State<ClipEditor> {
                         ),
                       ),
                     ],
-                  )
-                else ...[
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      const Icon(Icons.graphic_eq, color: _mint, size: 19),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          tr(
+                            '선택 구간 안에서 들을 위치를 조절하세요.',
+                            'Seek within the selected range.',
+                          ),
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Slider(
+                    min: start.inMilliseconds.toDouble(),
+                    max: max(
+                      start.inMilliseconds + 1,
+                      end.inMilliseconds,
+                    ).toDouble(),
+                    value: _previewPosition.inMilliseconds
+                        .clamp(
+                          start.inMilliseconds,
+                          max(start.inMilliseconds + 1, end.inMilliseconds),
+                        )
+                        .toDouble(),
+                    onChanged: audioPath == null
+                        ? null
+                        : (value) {
+                            _previewTimer?.cancel();
+                            _previewPlayer.pause();
+                            setState(() {
+                              _previewing = false;
+                              _previewPosition = Duration(
+                                milliseconds: value.round(),
+                              );
+                            });
+                          },
+                    onChangeEnd: audioPath == null
+                        ? null
+                        : (value) => _playSelectionFrom(
+                            Duration(milliseconds: value.round()),
+                          ),
+                  ),
+                  Row(
+                    children: [
+                      Text(
+                        clock(start),
+                        style: const TextStyle(color: Colors.white60),
+                      ),
+                      const Spacer(),
+                      Text(
+                        clock(_previewPosition),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        clock(end),
+                        style: const TextStyle(color: Colors.white60),
+                      ),
+                    ],
+                  ),
+                ] else ...[
                   Row(
                     children: [
                       const Icon(

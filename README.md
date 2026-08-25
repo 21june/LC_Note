@@ -24,9 +24,11 @@ The interface automatically follows the device language: Korean devices keep the
 
 - Import local audio in MP3, M4A, WAV, AAC, OGG, or FLAC format
 - Create precise listening clips by entering timestamps or exploring the audio timeline
-- Detect long silences, generate suggested segments automatically, and fine-tune the detection settings
-- Preview an automatically detected segment before selecting it
-- Preview a selected range before saving it
+- Detect long silences and generate suggested listening segments automatically
+- Customize silence sensitivity, minimum silence duration, minimum segment length, and boundary padding
+- Preview each detected segment before applying it to the clip editor
+- Scrub and resume playback anywhere inside the selected start–end range
+- Fine-tune timestamps manually or with the detailed timeline controls
 - Replay, shuffle, skip, and change playback speed
 - Attach a full transcript and personal study notes to each clip
 - Organize clips into editable playlists
@@ -74,11 +76,11 @@ flutter analyze
 flutter test
 ```
 
-The widget test suite covers the Korean and English interfaces, responsive player controls, playlist creation, clip management, timeline editing, seeking, and saving clips without a transcript.
+The widget test suite covers the Korean and English interfaces, responsive player controls, playlist creation, clip management, silence-based segmentation, short-segment merging, timeline editing, seeking, and saving clips without a transcript.
 
 ## Data and Privacy
 
-LC Note stores study data locally on the device. Imported audio remains in its original local location; the app saves the file reference and your clip metadata, transcript, notes, playlists, and playback settings.
+LC Note stores study data locally on the device. Imported audio remains in its original local location; the app saves the file reference and your clip metadata, transcript, notes, playlists, playback settings, and silence-detection preferences. Temporary low-resolution analysis files are removed immediately after segmentation.
 
 ## Project Status
 
