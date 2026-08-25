@@ -24,6 +24,8 @@ The interface automatically follows the device language: Korean devices keep the
 
 - Import local audio in MP3, M4A, WAV, AAC, OGG, or FLAC format
 - Create precise listening clips by entering timestamps or exploring the audio timeline
+- Detect long silences, generate suggested segments automatically, and fine-tune the detection settings
+- Preview an automatically detected segment before selecting it
 - Preview a selected range before saving it
 - Replay, shuffle, skip, and change playback speed
 - Attach a full transcript and personal study notes to each clip
@@ -38,6 +40,7 @@ The interface automatically follows the device language: Korean devices keep the
 - [Flutter](https://flutter.dev/) and Material 3
 - [`just_audio`](https://pub.dev/packages/just_audio) for playback and precise audio ranges
 - [`audio_service`](https://pub.dev/packages/audio_service) for Android media controls
+- [`audio_decoder`](https://pub.dev/packages/audio_decoder) for waveform analysis and silence-based segmentation
 - [`file_picker`](https://pub.dev/packages/file_picker) for local audio selection
 - [`shared_preferences`](https://pub.dev/packages/shared_preferences) for local persistence
 

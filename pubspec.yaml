@@ -38,6 +38,7 @@ dependencies:
   audio_service: ^0.18.19
   file_picker: 10.3.10
   shared_preferences: ^2.5.5
+  audio_decoder: ^0.8.1
 
 dev_dependencies:
   flutter_test:

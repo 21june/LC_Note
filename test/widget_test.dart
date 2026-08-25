@@ -12,12 +12,58 @@ void main() {
 
   tearDown(binding.platformDispatcher.clearLocaleTestValue);
 
+  test('긴 무음을 기준으로 음성 구간을 나눈다', () {
+    final amplitudes = <double>[
+      ...List.filled(10, .5),
+      ...List.filled(10, .01),
+      ...List.filled(10, .6),
+    ];
+    final segments = detectSpeechSegments(
+      amplitudes: amplitudes,
+      duration: const Duration(seconds: 3),
+      settings: const SilenceDetectionSettings(
+        minimumSilence: Duration(milliseconds: 800),
+        minimumSegment: Duration(milliseconds: 500),
+        padding: Duration(milliseconds: 100),
+      ),
+    );
+
+    expect(segments, hasLength(2));
+    expect(segments.first.end, const Duration(milliseconds: 1100));
+    expect(segments.last.start, const Duration(milliseconds: 1900));
+  });
+
+  test('너무 짧은 자동 구간은 이전 구간과 합친다', () {
+    final amplitudes = <double>[
+      ...List.filled(10, .5),
+      ...List.filled(10, .01),
+      ...List.filled(2, .5),
+      ...List.filled(10, .01),
+      ...List.filled(10, .5),
+    ];
+    final segments = detectSpeechSegments(
+      amplitudes: amplitudes,
+      duration: const Duration(milliseconds: 4200),
+      settings: const SilenceDetectionSettings(
+        minimumSilence: Duration(milliseconds: 800),
+        minimumSegment: Duration(milliseconds: 500),
+        padding: Duration.zero,
+      ),
+    );
+
+    expect(segments, hasLength(2));
+    expect(segments.first.end, const Duration(milliseconds: 2200));
+  });
+
   testWidgets('한국어 외 시스템 언어에서는 영어로 표시된다', (tester) async {
     SharedPreferences.setMockInitialValues({});
     binding.platformDispatcher.localeTestValue = const Locale('en');
     await tester.pumpWidget(const MyListenerApp());
 
-    expect(find.text('What would you like to\nlisten to again?'), findsOneWidget);
+    expect(
+      find.text('What would you like to\nlisten to again?'),
+      findsOneWidget,
+    );
     expect(find.text('Changing a Hotel Reservation'), findsWidgets);
     expect(find.text('Playlists'), findsOneWidget);
   });

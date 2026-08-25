@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
+import 'package:audio_decoder/audio_decoder.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -25,6 +28,92 @@ String clock(Duration value) {
   final minutes = value.inMinutes.remainder(60).toString().padLeft(2, '0');
   final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
   return '$minutes:$seconds';
+}
+
+class SilenceDetectionSettings {
+  const SilenceDetectionSettings({
+    this.threshold = 0.04,
+    this.minimumSilence = const Duration(milliseconds: 800),
+    this.minimumSegment = const Duration(seconds: 3),
+    this.padding = const Duration(milliseconds: 200),
+  });
+
+  final double threshold;
+  final Duration minimumSilence;
+  final Duration minimumSegment;
+  final Duration padding;
+}
+
+class DetectedSegment {
+  const DetectedSegment(this.start, this.end);
+
+  final Duration start;
+  final Duration end;
+  Duration get length => end - start;
+}
+
+List<DetectedSegment> detectSpeechSegments({
+  required List<double> amplitudes,
+  required Duration duration,
+  SilenceDetectionSettings settings = const SilenceDetectionSettings(),
+}) {
+  if (amplitudes.isEmpty || duration <= Duration.zero) return const [];
+  final sampleMs = duration.inMilliseconds / amplitudes.length;
+  final minimumSilentSamples = max(
+    1,
+    (settings.minimumSilence.inMilliseconds / sampleMs).ceil(),
+  );
+  final silentRanges = <(int, int)>[];
+  int? silentStart;
+  for (var i = 0; i <= amplitudes.length; i++) {
+    final silent = i < amplitudes.length && amplitudes[i] <= settings.threshold;
+    if (silent && silentStart == null) silentStart = i;
+    if (!silent && silentStart != null) {
+      if (i - silentStart >= minimumSilentSamples) {
+        silentRanges.add((silentStart, i));
+      }
+      silentStart = null;
+    }
+  }
+
+  final raw = <DetectedSegment>[];
+  var contentStartMs = 0;
+  for (final range in silentRanges) {
+    final silenceStartMs = (range.$1 * sampleMs).round();
+    final silenceEndMs = (range.$2 * sampleMs).round();
+    final segmentEndMs = min(
+      duration.inMilliseconds,
+      silenceStartMs + settings.padding.inMilliseconds,
+    );
+    if (segmentEndMs > contentStartMs) {
+      raw.add(
+        DetectedSegment(
+          Duration(milliseconds: contentStartMs),
+          Duration(milliseconds: segmentEndMs),
+        ),
+      );
+    }
+    contentStartMs = max(0, silenceEndMs - settings.padding.inMilliseconds);
+  }
+  if (contentStartMs < duration.inMilliseconds) {
+    raw.add(DetectedSegment(Duration(milliseconds: contentStartMs), duration));
+  }
+
+  final merged = <DetectedSegment>[];
+  for (final segment in raw) {
+    if (segment.length < settings.minimumSegment && merged.isNotEmpty) {
+      final previous = merged.removeLast();
+      merged.add(DetectedSegment(previous.start, segment.end));
+    } else {
+      merged.add(segment);
+    }
+  }
+  if (merged.length > 1 && merged.first.length < settings.minimumSegment) {
+    final first = merged.removeAt(0);
+    final second = merged.removeAt(0);
+    merged.insert(0, DetectedSegment(first.start, second.end));
+  }
+  return merged.where((segment) => segment.length > Duration.zero).toList();
 }
 
 class StudyClip {
@@ -1770,6 +1859,10 @@ class _ClipEditorState extends State<ClipEditor> {
   Duration _locatorPosition = Duration.zero;
   Duration _detailCenter = Duration.zero;
   int _detailWindowSeconds = 30;
+  SilenceDetectionSettings _silenceSettings = const SilenceDetectionSettings();
+  List<DetectedSegment> _detectedSegments = const [];
+  int? _selectedDetectedSegment;
+  bool _analyzingSilence = false;
   StreamSubscription<Duration>? _locatorSubscription;
 
   int get _detailStartMs {
@@ -1786,6 +1879,7 @@ class _ClipEditorState extends State<ClipEditor> {
   @override
   void initState() {
     super.initState();
+    unawaited(_restoreSilenceSettings());
     final c = widget.clip;
     title = TextEditingController(
       text: c?.title ?? tr('새 Conversation', 'New Conversation'),
@@ -1838,6 +1932,8 @@ class _ClipEditorState extends State<ClipEditor> {
     setState(() {
       audioPath = file!.path;
       source.text = file.name;
+      _detectedSegments = const [];
+      _selectedDetectedSegment = null;
     });
     try {
       final duration = await _setPreviewFile(file!.path!);
@@ -1891,6 +1987,301 @@ class _ClipEditorState extends State<ClipEditor> {
     } catch (_) {
       // A clear message is shown when the user tries to play the missing file.
     }
+  }
+
+  Future<void> _analyzeSilence() async {
+    if (audioPath == null || _audioDuration <= Duration.zero) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            tr(
+              '먼저 원본 오디오 파일을 선택해 주세요.',
+              'Please select the original audio file first.',
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+    setState(() => _analyzingSilence = true);
+    try {
+      final amplitudes = await _extractWaveformMemorySafe(audioPath!);
+      final segments = detectSpeechSegments(
+        amplitudes: amplitudes,
+        duration: _audioDuration,
+        settings: _silenceSettings,
+      );
+      if (!mounted) return;
+      setState(() {
+        _detectedSegments = segments;
+        _selectedDetectedSegment = null;
+        _analyzingSilence = false;
+      });
+      if (segments.length <= 1) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              tr(
+                '긴 무음을 찾지 못했습니다. 감지 설정을 조정해 보세요.',
+                'No long silence was found. Try adjusting the detection settings.',
+              ),
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _analyzingSilence = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            tr(
+              '오디오를 분석할 수 없습니다. 다른 파일이나 설정으로 다시 시도해 주세요.',
+              'Unable to analyze this audio. Try another file or different settings.',
+            ),
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<List<double>> _extractWaveformMemorySafe(String inputPath) async {
+    const sampleRate = 8000;
+    const samplesPerWindow = sampleRate ~/ 10;
+    final separator = Platform.pathSeparator;
+    final tempFile = File(
+      '${Directory.systemTemp.path}${separator}lc_note_analysis_${DateTime.now().microsecondsSinceEpoch}.wav',
+    );
+    RandomAccessFile? reader;
+    try {
+      final wavPath = await AudioDecoder.convertToWav(
+        inputPath,
+        tempFile.path,
+        sampleRate: sampleRate,
+        channels: 1,
+        bitDepth: 16,
+      );
+      reader = await File(wavPath).open();
+      final header = await reader.read(44);
+      if (header.length < 44 ||
+          ascii.decode(header.sublist(0, 4), allowInvalid: true) != 'RIFF' ||
+          ascii.decode(header.sublist(8, 12), allowInvalid: true) != 'WAVE') {
+        throw const FormatException('Invalid WAV output');
+      }
+
+      await reader.setPosition(12);
+      var dataSize = 0;
+      while (await reader.position() + 8 <= await reader.length()) {
+        final chunkHeader = await reader.read(8);
+        if (chunkHeader.length < 8) break;
+        final chunkId = ascii.decode(
+          chunkHeader.sublist(0, 4),
+          allowInvalid: true,
+        );
+        final chunkSize = ByteData.sublistView(
+          Uint8List.fromList(chunkHeader),
+        ).getUint32(4, Endian.little);
+        if (chunkId == 'data') {
+          dataSize = chunkSize;
+          break;
+        }
+        await reader.setPosition(
+          await reader.position() + chunkSize + (chunkSize.isOdd ? 1 : 0),
+        );
+      }
+      if (dataSize <= 0) throw const FormatException('Missing WAV data');
+
+      final amplitudes = <double>[];
+      var remainingBytes = dataSize;
+      var maximum = 0.0;
+      const bytesPerWindow = samplesPerWindow * 2;
+      while (remainingBytes > 0) {
+        final bytes = await reader.read(min(bytesPerWindow, remainingBytes));
+        if (bytes.isEmpty) break;
+        remainingBytes -= bytes.length;
+        final data = ByteData.sublistView(Uint8List.fromList(bytes));
+        var squaredSum = 0.0;
+        final sampleCount = bytes.length ~/ 2;
+        for (var offset = 0; offset + 1 < bytes.length; offset += 2) {
+          final sample = data.getInt16(offset, Endian.little) / 32768.0;
+          squaredSum += sample * sample;
+        }
+        final rms = sampleCount == 0 ? 0.0 : sqrt(squaredSum / sampleCount);
+        amplitudes.add(rms);
+        maximum = max(maximum, rms);
+      }
+      if (maximum > 0) {
+        for (var i = 0; i < amplitudes.length; i++) {
+          amplitudes[i] /= maximum;
+        }
+      }
+      return amplitudes;
+    } finally {
+      await reader?.close();
+      if (await tempFile.exists()) await tempFile.delete();
+    }
+  }
+
+  Future<void> _restoreSilenceSettings() async {
+    final preferences = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _silenceSettings = SilenceDetectionSettings(
+        threshold: preferences.getDouble('silenceThreshold') ?? .04,
+        minimumSilence: Duration(
+          milliseconds: preferences.getInt('minimumSilenceMs') ?? 800,
+        ),
+        minimumSegment: Duration(
+          milliseconds: preferences.getInt('minimumSegmentMs') ?? 3000,
+        ),
+        padding: Duration(
+          milliseconds: preferences.getInt('silencePaddingMs') ?? 200,
+        ),
+      );
+    });
+  }
+
+  Future<void> _saveSilenceSettings() async {
+    final preferences = await SharedPreferences.getInstance();
+    await Future.wait([
+      preferences.setDouble('silenceThreshold', _silenceSettings.threshold),
+      preferences.setInt(
+        'minimumSilenceMs',
+        _silenceSettings.minimumSilence.inMilliseconds,
+      ),
+      preferences.setInt(
+        'minimumSegmentMs',
+        _silenceSettings.minimumSegment.inMilliseconds,
+      ),
+      preferences.setInt(
+        'silencePaddingMs',
+        _silenceSettings.padding.inMilliseconds,
+      ),
+    ]);
+  }
+
+  Future<void> _showSilenceSettings() async {
+    var threshold = _silenceSettings.threshold;
+    var minimumSilenceMs = _silenceSettings.minimumSilence.inMilliseconds;
+    var minimumSegmentMs = _silenceSettings.minimumSegment.inMilliseconds;
+    var paddingMs = _silenceSettings.padding.inMilliseconds;
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  tr('자동 구간 감지 설정', 'Automatic Segmentation Settings'),
+                  style: Theme.of(context).textTheme.headlineMedium,
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  tr(
+                    '무음 민감도 · ${(threshold * 100).round()}%',
+                    'Silence sensitivity · ${(threshold * 100).round()}%',
+                  ),
+                ),
+                Slider(
+                  value: threshold,
+                  min: .01,
+                  max: .15,
+                  divisions: 14,
+                  onChanged: (value) => setSheetState(() => threshold = value),
+                ),
+                Text(
+                  tr(
+                    '최소 무음 길이 · ${(minimumSilenceMs / 1000).toStringAsFixed(1)}초',
+                    'Minimum silence · ${(minimumSilenceMs / 1000).toStringAsFixed(1)} sec',
+                  ),
+                ),
+                Slider(
+                  value: minimumSilenceMs.toDouble(),
+                  min: 300,
+                  max: 2500,
+                  divisions: 22,
+                  onChanged: (value) =>
+                      setSheetState(() => minimumSilenceMs = value.round()),
+                ),
+                Text(
+                  tr(
+                    '최소 구간 길이 · ${(minimumSegmentMs / 1000).toStringAsFixed(0)}초',
+                    'Minimum segment · ${(minimumSegmentMs / 1000).toStringAsFixed(0)} sec',
+                  ),
+                ),
+                Slider(
+                  value: minimumSegmentMs.toDouble(),
+                  min: 1000,
+                  max: 15000,
+                  divisions: 14,
+                  onChanged: (value) =>
+                      setSheetState(() => minimumSegmentMs = value.round()),
+                ),
+                Text(
+                  tr(
+                    '앞뒤 여유 · ${(paddingMs / 1000).toStringAsFixed(1)}초',
+                    'Boundary padding · ${(paddingMs / 1000).toStringAsFixed(1)} sec',
+                  ),
+                ),
+                Slider(
+                  value: paddingMs.toDouble(),
+                  min: 0,
+                  max: 1000,
+                  divisions: 10,
+                  onChanged: (value) =>
+                      setSheetState(() => paddingMs = value.round()),
+                ),
+                const SizedBox(height: 8),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                  ),
+                  child: Text(tr('설정 저장', 'Save Settings')),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    if (saved != true || !mounted) return;
+    setState(() {
+      _silenceSettings = SilenceDetectionSettings(
+        threshold: threshold,
+        minimumSilence: Duration(milliseconds: minimumSilenceMs),
+        minimumSegment: Duration(milliseconds: minimumSegmentMs),
+        padding: Duration(milliseconds: paddingMs),
+      );
+      _detectedSegments = const [];
+      _selectedDetectedSegment = null;
+    });
+    await _saveSilenceSettings();
+  }
+
+  void _useDetectedSegment(int index) {
+    final segment = _detectedSegments[index];
+    _previewPlayer.pause();
+    _previewTimer?.cancel();
+    setState(() {
+      _selectedDetectedSegment = index;
+      start = segment.start;
+      end = segment.end;
+      _locatorPosition = segment.start;
+      _detailCenter = segment.start;
+      _previewing = false;
+      _locatorPlaying = false;
+    });
+  }
+
+  Future<void> _previewDetectedSegment(int index) async {
+    _useDetectedSegment(index);
+    await _togglePreview();
   }
 
   Future<void> _playFromLocator([Duration? position]) async {
@@ -2482,6 +2873,126 @@ class _ClipEditorState extends State<ClipEditor> {
                 icon: const Icon(Icons.folder_open_outlined),
               ),
               border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEAF3F1),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFFD3E5E1)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.auto_awesome, color: _blue),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        tr('무음 기준 자동 구간', 'Automatic Silence Segments'),
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: _showSilenceSettings,
+                      tooltip: tr('감지 설정', 'Detection Settings'),
+                      icon: const Icon(Icons.tune),
+                    ),
+                  ],
+                ),
+                Text(
+                  tr(
+                    '긴 무음을 찾아 듣기 문제를 자동으로 나눕니다.',
+                    'Find long silences and split the listening exercise automatically.',
+                  ),
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: audioPath == null || _analyzingSilence
+                      ? null
+                      : _analyzeSilence,
+                  icon: _analyzingSilence
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.content_cut),
+                  label: Text(
+                    _analyzingSilence
+                        ? tr('오디오 분석 중…', 'Analyzing Audio…')
+                        : tr('자동 구간 찾기', 'Find Segments Automatically'),
+                  ),
+                ),
+                if (_detectedSegments.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  Text(
+                    tr(
+                      '${_detectedSegments.length}개 구간을 찾았습니다. 사용할 구간을 선택하세요.',
+                      '${_detectedSegments.length} ${_detectedSegments.length == 1 ? 'segment' : 'segments'} found. Select one to use.',
+                    ),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  ...List.generate(_detectedSegments.length, (index) {
+                    final segment = _detectedSegments[index];
+                    final selected = _selectedDetectedSegment == index;
+                    return Card(
+                      elevation: 0,
+                      color: selected ? _mint : Colors.white,
+                      margin: const EdgeInsets.only(bottom: 7),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => _useDetectedSegment(index),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+                          child: Row(
+                            children: [
+                              Icon(
+                                selected
+                                    ? Icons.check_circle
+                                    : Icons.radio_button_unchecked,
+                                color: selected ? _blue : _muted,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      tr(
+                                        '구간 ${index + 1}',
+                                        'Segment ${index + 1}',
+                                      ),
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    Text(
+                                      '${clock(segment.start)} – ${clock(segment.end)} · ${clock(segment.length)}',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodyMedium,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: () => _previewDetectedSegment(index),
+                                tooltip: tr('미리 듣기', 'Preview'),
+                                icon: const Icon(Icons.play_arrow_rounded),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ],
             ),
           ),
           const SizedBox(height: 14),
